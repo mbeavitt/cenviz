@@ -1,5 +1,7 @@
 Program to visualise centromere repeats as dotplots, with meaningful colours.
 
+Note: requires this dependency to be installed via pip: https://github.com/mbeavitt/trash-compactor
+
 ## Usage
 
 Requires a repeat table CSV in TRASH output format.
