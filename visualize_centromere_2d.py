@@ -34,6 +34,8 @@ from sklearn.preprocessing import MinMaxScaler
 from umap import UMAP
 import Levenshtein
 import warnings
+import pickle
+import pandas as pd
 
 from trash_compactor import utils
 
@@ -42,42 +44,70 @@ class CentromereVisualizer:
     """Visualize entire centromeric region as 2D grid of colored repeat tiles"""
 
     def __init__(self, repeats_table_path, chromosome, start=None, end=None,
-                 output_dir='centromere_2d_output', name=None, precomputed_color_map=None):
+                 output_dir='centromere_2d_output', name=None, precomputed_color_map=None,
+                 filelist=None, cache_file=None):
         """
         Initialize the visualizer.
 
         Args:
-            repeats_table_path: Path to TRASH repeats table CSV
+            repeats_table_path: Path to TRASH repeats table CSV (or None if using filelist)
             chromosome: Chromosome name (e.g., 'Chr6')
             start: Start coordinate (bp), None for chromosome start
             end: End coordinate (bp), None for chromosome end
             output_dir: Output directory for figures
             name: Optional accession/sample name for title
             precomputed_color_map: Optional pre-computed global color map (for multi-chromosome runs)
+            filelist: Optional path to file containing list of CSV paths (one per line)
+            cache_file: Optional path to cache file for saving/loading color map
         """
         print("=" * 60)
         print("Centromere 2D Visualizer")
         print("=" * 60)
 
-        self.repeats_table_path = Path(repeats_table_path)
         self.chromosome = chromosome
         self.start = start
         self.end = end
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.name = name
+        self.cache_file = Path(cache_file) if cache_file else None
 
-        print(f"\nLoading repeats table from {repeats_table_path}")
-        self.full_repeats_table = utils.import_repeats_table(repeats_table_path)
-        print(f"  Loaded {len(self.full_repeats_table):,} total repeats")
+        # Load data from filelist or single file
+        if filelist:
+            print(f"\nLoading repeats from filelist: {filelist}")
+            with open(filelist, 'r') as f:
+                csv_paths = [line.strip() for line in f if line.strip()]
 
-        # Use precomputed color map or compute new one from ALL chromosomes
+            print(f"  Found {len(csv_paths)} CSV files in filelist")
+
+            # Load and combine all CSVs
+            all_tables = []
+            for csv_path in csv_paths:
+                print(f"  Loading {csv_path}...")
+                table = utils.import_repeats_table(csv_path)
+                all_tables.append(table)
+                print(f"    Loaded {len(table):,} repeats")
+
+            self.full_repeats_table = pd.concat(all_tables, ignore_index=True)
+            print(f"  Combined total: {len(self.full_repeats_table):,} repeats")
+        else:
+            self.repeats_table_path = Path(repeats_table_path)
+            print(f"\nLoading repeats table from {repeats_table_path}")
+            self.full_repeats_table = utils.import_repeats_table(repeats_table_path)
+            print(f"  Loaded {len(self.full_repeats_table):,} total repeats")
+
+        # Try to load cache, use precomputed, or compute new color map
         if precomputed_color_map is not None:
             print("\nUsing precomputed global color map...")
             self.global_color_map = precomputed_color_map
+        elif self.cache_file and self.cache_file.exists():
+            print(f"\nLoading color map from cache: {self.cache_file}")
+            self.global_color_map = self._load_cache()
         else:
             print("\nComputing global color map from ALL chromosomes...")
             self._compute_global_colors()
+            if self.cache_file:
+                self._save_cache()
 
         # Filter to chromosome
         print(f"\nFiltering to {chromosome}...")
@@ -172,6 +202,27 @@ class CentromereVisualizer:
 
         # Save 3D UMAP visualization
         self._save_3d_color_space(rgb_coords)
+
+    def _save_cache(self):
+        """Save the global color map to cache file"""
+        if self.cache_file:
+            print(f"\nSaving color map to cache: {self.cache_file}")
+            cache_data = {
+                'global_color_map': self.global_color_map,
+                'unique_sequences': self.unique_sequences
+            }
+            with open(self.cache_file, 'wb') as f:
+                pickle.dump(cache_data, f)
+            print(f"  Cache saved ({len(self.global_color_map):,} sequences)")
+
+    def _load_cache(self):
+        """Load the global color map from cache file"""
+        with open(self.cache_file, 'rb') as f:
+            cache_data = pickle.load(f)
+
+        self.unique_sequences = cache_data['unique_sequences']
+        print(f"  Loaded color map for {len(cache_data['global_color_map']):,} unique sequences")
+        return cache_data['global_color_map']
 
     def _save_3d_color_space(self, rgb_coords):
         """Save 3D visualization of the color space"""
@@ -407,8 +458,12 @@ Examples:
         """
     )
 
-    parser.add_argument('repeats_table',
+    parser.add_argument('repeats_table', nargs='?',
                        help='Path to TRASH repeats table CSV')
+    parser.add_argument('--filelist',
+                       help='Path to file containing list of CSV paths (one per line)')
+    parser.add_argument('--cache-file',
+                       help='Path to cache file for saving/loading UMAP color map')
     parser.add_argument('--chromosome',
                        help='Chromosome name (e.g., Chr6). If not specified, plots ALL chromosomes.')
     parser.add_argument('--start', type=int,
@@ -430,10 +485,25 @@ Examples:
 
     args = parser.parse_args()
 
+    # Validate input
+    if not args.repeats_table and not args.filelist:
+        parser.error("Either repeats_table or --filelist must be provided")
+
     # Load repeats table to get available chromosomes
-    print(f"\nLoading repeats table from {args.repeats_table}")
-    full_repeats_table = utils.import_repeats_table(args.repeats_table)
-    print(f"  Loaded {len(full_repeats_table):,} total repeats")
+    if args.filelist:
+        print(f"\nLoading repeats from filelist: {args.filelist}")
+        with open(args.filelist, 'r') as f:
+            csv_paths = [line.strip() for line in f if line.strip()]
+
+        print(f"  Found {len(csv_paths)} CSV files")
+
+        # Load first CSV to get chromosomes
+        full_repeats_table = utils.import_repeats_table(csv_paths[0])
+        print(f"  Loaded first CSV: {len(full_repeats_table):,} repeats")
+    else:
+        print(f"\nLoading repeats table from {args.repeats_table}")
+        full_repeats_table = utils.import_repeats_table(args.repeats_table)
+        print(f"  Loaded {len(full_repeats_table):,} total repeats")
 
     # Determine which chromosomes to process
     if args.chromosome:
@@ -450,7 +520,9 @@ Examples:
         start=args.start if args.chromosome else None,
         end=args.end if args.chromosome else None,
         output_dir=args.output_dir,
-        name=args.name
+        name=args.name,
+        filelist=args.filelist,
+        cache_file=args.cache_file
     )
 
     # Create visualization for first chromosome
@@ -485,7 +557,9 @@ Examples:
                 end=None,
                 output_dir=args.output_dir,
                 name=args.name,
-                precomputed_color_map=global_color_map
+                precomputed_color_map=global_color_map,
+                filelist=args.filelist,
+                cache_file=None  # Only save cache once from first visualizer
             )
 
             viz_chrom.visualize(
